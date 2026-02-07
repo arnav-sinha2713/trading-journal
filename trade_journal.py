@@ -19,8 +19,7 @@ if not st.user.get("is_logged_in", False):
 # --- GOOGLE SHEETS CONNECTION ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# Sanitize email for worksheet (Tab) name compatibility
-# Replaced .replace("", "") with actual underscore replacements for stability
+# Sanitize email for worksheet (Tab) name compatibility (Max 31 chars)
 user_email = st.user.email.replace("@", "_").replace(".", "_")[:31]
 IMAGE_DIR = f"charts_{user_email}"
 
@@ -34,13 +33,14 @@ if st.sidebar.button("Logout"):
 
 # --- LOAD DATA FROM GOOGLE SHEETS ---
 try:
+    # ttl=0 ensures we don't use cached data when the sheet updates
     df = conn.read(worksheet=user_email, ttl=0)
     if not df.empty:
         df["Net_PnL"] = pd.to_numeric(df["Net_PnL"], errors='coerce').fillna(0)
         df["Return_Pct"] = pd.to_numeric(df["Return_Pct"], errors='coerce').fillna(0)
         df["Qty"] = pd.to_numeric(df["Qty"], errors='coerce').fillna(0)
 except Exception:
-    # Initialize empty DF with explicit column names
+    # Initialize empty DF if user tab doesn't exist yet
     df = pd.DataFrame(columns=[
         "Date", "Symbol", "Type", "Confidence", "Entry", "Exit", "Qty", 
         "StopLoss", "Target", "Net_PnL", "Return_Pct", "Status", "Notes", "Chart_Path"
@@ -78,6 +78,7 @@ with st.sidebar:
 
             status = "Closed" if exit_p > 0 else "Open"
             
+            # Profit/Loss Logic
             if trade_type == "LONG":
                 net_pnl = (exit_p - entry_p) * qty if exit_p > 0 else 0
             else: # SHORT
@@ -93,14 +94,13 @@ with st.sidebar:
                 "Notes": notes, "Chart_Path": chart_path
             }])
             
-            # Using the safer concat method for 2026 standards
             updated_df = pd.concat([df, new_row], ignore_index=True)
             
+            # --- AUTO-TAB CREATION & UPDATE ---
             try:
                 conn.update(worksheet=user_email, data=updated_df)
             except Exception:
                 st.info(f"Creating new tab for {user_email}...")
-                # Robust multi-version check for the internal gspread client
                 try:
                     spreadsheet = conn._instance.client.open_by_key(conn._spreadsheet_id)
                 except AttributeError:
@@ -133,7 +133,6 @@ if not df.empty:
 
     with tab2:
         st.subheader("Visual Playbook")
-        # Ensure path is a string for os.path.exists
         image_trades = df[df['Chart_Path'].notna() & (df['Chart_Path'] != "")]
         if not image_trades.empty:
             for i in range(0, len(image_trades), 3):
