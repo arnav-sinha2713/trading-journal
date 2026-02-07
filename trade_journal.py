@@ -3,12 +3,13 @@ import pandas as pd
 from datetime import datetime
 import os
 from PIL import Image
-from streamlit_gsheets import GSheetsConnection  # NEW: Import connector
+from streamlit_gsheets import GSheetsConnection 
 
-# 1. MUST BE FIRST: Page Config
+# 1. Page Config (MUST BE FIRST)
 st.set_page_config(page_title="Stonk Logger Pro", layout="wide")
 
 # --- AUTHENTICATION CHECK ---
+# Uses the newer st.user.get method to prevent AttributeErrors
 if not st.user.get("is_logged_in", False):
     st.title("🔒 Stonk Journal Pro")
     st.info("Welcome! Please log in with your Google account to access your private trading journal.")
@@ -16,28 +17,34 @@ if not st.user.get("is_logged_in", False):
         st.login()
     st.stop() 
 
-# --- NEW: GOOGLE SHEETS CONNECTION ---
-# This replaces the local LOG_FILE logic
+# --- GOOGLE SHEETS CONNECTION ---
+# This connects to the spreadsheet defined in your Streamlit Secrets
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# Sanitize email for worksheet (Tab) name compatibility
-user_email = st.user.email.replace("@", "_").replace(".", "_")
+# Sanitize email for worksheet (Tab) name compatibility (Max 31 chars)
+user_email = st.user.email.replace("@", "_").replace(".", "_")[:31]
 IMAGE_DIR = f"charts_{user_email}"
 
+# Ensure user-specific image directory exists for the current session
 if not os.path.exists(IMAGE_DIR):
     os.makedirs(IMAGE_DIR)
 
-# Sidebar User Info
+# Sidebar User Info & Logout
 st.sidebar.write(f"👋 Hello, {st.user.name}")
 if st.sidebar.button("Logout"):
     st.logout()
 
-# --- NEW: LOAD DATA FROM GOOGLE SHEETS ---
+# --- LOAD DATA FROM GOOGLE SHEETS ---
 try:
-    # This reads the specific "Tab" for the logged-in user
-    df = conn.read(worksheet=user_email)
+    # ttl=0 ensures we don't use cached data when the sheet updates
+    df = conn.read(worksheet=user_email, ttl=0)
+    # Ensure math works by converting columns to numeric
+    if not df.empty:
+        df["Net_PnL"] = pd.to_numeric(df["Net_PnL"], errors='coerce').fillna(0)
+        df["Return_Pct"] = pd.to_numeric(df["Return_Pct"], errors='coerce').fillna(0)
+        df["Qty"] = pd.to_numeric(df["Qty"], errors='coerce').fillna(0)
 except Exception:
-    # If the user is new and their tab doesn't exist yet, create an empty structure
+    # If the user is new and their tab doesn't exist, start with a fresh DataFrame
     df = pd.DataFrame(columns=[
         "Date", "Symbol", "Type", "Confidence", "Entry", "Exit", "Qty", 
         "StopLoss", "Target", "Net_PnL", "Return_Pct", "Status", "Notes", "Chart_Path"
@@ -47,7 +54,6 @@ except Exception:
 with st.sidebar:
     st.title("➕ New Trade")
     with st.form("trade_form", clear_on_submit=True):
-        # Convert date to string for Google Sheets compatibility
         date = st.date_input("Date", datetime.now()).strftime('%Y-%m-%d')
         symbol = st.text_input("Ticker").upper()
         trade_type = st.selectbox("Type", ["LONG", "SHORT"])
@@ -65,18 +71,24 @@ with st.sidebar:
         uploaded_file = st.file_uploader("Upload Chart Screenshot", type=["png", "jpg", "jpeg"])
         notes = st.text_area("Trade Notes")
         
-        submit = st.form_submit_button("Add to Journal")
+        submit = st.form_submit_button("🚀 Add to Journal")
         
         if submit and symbol and entry_p > 0:
             chart_path = ""
             if uploaded_file is not None:
+                # Save locally for the current session (note: cloud resets will clear this folder)
                 chart_path = os.path.join(IMAGE_DIR, f"{symbol}_{date}_{datetime.now().strftime('%H%M%S')}.png")
                 img = Image.open(uploaded_file)
                 img.save(chart_path)
 
             status = "Closed" if exit_p > 0 else "Open"
-            net_pnl = (exit_p - entry_p) * qty if exit_p > 0 else 0
-            if trade_type == "SHORT" and exit_p > 0: net_pnl = (entry_p - exit_p) * qty
+            
+            # PnL Calculation Logic
+            if trade_type == "LONG":
+                net_pnl = (exit_p - entry_p) * qty if exit_p > 0 else 0
+            else: # SHORT
+                net_pnl = (entry_p - exit_p) * qty if exit_p > 0 else 0
+            
             ret_pct = (net_pnl / (entry_p * qty)) * 100 if exit_p > 0 else 0
             
             new_row = {
@@ -87,24 +99,21 @@ with st.sidebar:
                 "Notes": notes, "Chart_Path": chart_path
             }
             
-            # --- NEW: UPDATE GOOGLE SHEETS ---
-            # Add the new row to the current dataframe and push to the cloud
+            # Update Google Sheets: Append the new row to existing data
             updated_df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
             conn.update(worksheet=user_email, data=updated_df)
             
             st.success(f"Trade for {symbol} saved to Google Sheets!")
             st.rerun()
 
-# --- MAIN DASHBOARD (Rest remains mostly the same) ---
-st.title("🚀 Portfolio Overview")
+# --- MAIN DASHBOARD ---
+st.title("📊 Portfolio Overview")
 
 if not df.empty:
     m1, m2, m3, m4 = st.columns(4)
-    # Ensure numeric types for calculations
-    df["Net_PnL"] = pd.to_numeric(df["Net_PnL"])
-    df["Return_Pct"] = pd.to_numeric(df["Return_Pct"])
     
-    closed_trades = df[df['Status'] == 'Closed']
+    # Filter for closed trades to show performance metrics
+    closed_trades = df[df['Status'] == 'Closed'].copy()
     total_pnl = closed_trades['Net_PnL'].sum()
     win_rate = (closed_trades['Net_PnL'] > 0).mean() * 100 if len(closed_trades) > 0 else 0
     
@@ -113,9 +122,10 @@ if not df.empty:
     m3.metric("Avg Return", f"{closed_trades['Return_Pct'].mean():.2f}%" if len(closed_trades) > 0 else "0%")
     m4.metric("Active Trades", len(df[df['Status'] == 'Open']))
 
-    tab1, tab2, tab3 = st.tabs(["📜 Trade Log", "🖼️ Chart Gallery", "📊 Stats"])
+    tab1, tab2, tab3 = st.tabs(["📜 Trade Log", "🖼️ Chart Gallery", "📈 Performance Stats"])
 
     with tab1:
+        # Display full log sorted by most recent
         st.dataframe(df.sort_values(by="Date", ascending=False), use_container_width=True)
 
     with tab2:
@@ -134,7 +144,17 @@ if not df.empty:
             st.info("No charts uploaded yet.")
 
     with tab3:
-        st.subheader("Performance by Confidence")
-        st.bar_chart(data=df, x='Confidence', y='Return_Pct')
+        st.subheader("Equity Curve (Cumulative PnL)")
+        if not closed_trades.empty:
+            # Sort by date and calculate running total
+            plot_df = closed_trades.sort_values("Date")
+            plot_df['Cumulative_PnL'] = plot_df['Net_PnL'].cumsum()
+            st.line_chart(plot_df.set_index("Date")['Cumulative_PnL'])
+            
+            # Confidence vs Return Bar Chart
+            st.subheader("Return % by Confidence Level")
+            st.bar_chart(data=df, x='Confidence', y='Return_Pct')
+        else:
+            st.info("Close some trades to generate performance charts.")
 else:
     st.info("Log your first trade to see the analytics.")
