@@ -94,17 +94,27 @@ with st.sidebar:
             
             updated_df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
             
-            # --- AUTO-TAB CREATION LOGIC ---
             try:
+                # Try updating the sheet normally
                 conn.update(worksheet=user_email, data=updated_df)
             except Exception:
-                st.info(f"Creating new tab for {user_email}...")
-                # Access the internal gspread client to add the worksheet manually
-                spreadsheet = conn._instance.client.open_by_key(conn._spreadsheet_id)
+                st.info(f"Creating a new worksheet for {user_email}...")
+                
+                # Access the client directly to create the sheet
+                # This uses the underlying gspread library properly
+                try:
+                    # For newer versions of the connector, use the session's client
+                    client = conn._instance
+                    spreadsheet = client.open_by_key(conn._spreadsheet_id)
+                except AttributeError:
+                    # Fallback for older/alternate versions
+                    spreadsheet = conn.client.open_by_key(conn._spreadsheet_id)
+                
+                # Create the worksheet and re-try the update
                 spreadsheet.add_worksheet(title=user_email, rows="100", cols="20")
                 conn.update(worksheet=user_email, data=updated_df)
             
-            st.success(f"Trade for {symbol} saved!")
+            st.success(f"Trade for {symbol} saved to Cloud!")
             st.rerun()
 
 # --- MAIN DASHBOARD ---
@@ -154,3 +164,4 @@ if not df.empty:
             st.info("Close some trades to generate performance charts.")
 else:
     st.info("Log your first trade to see the analytics.")
+
