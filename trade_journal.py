@@ -19,7 +19,8 @@ if not st.user.get("is_logged_in", False):
 # --- GOOGLE SHEETS CONNECTION ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# Sanitize email for worksheet (Tab) name compatibility (Max 31 chars)
+# Sanitize email for worksheet (Tab) name compatibility
+# Replaced .replace("", "") with actual underscore replacements for stability
 user_email = st.user.email.replace("@", "_").replace(".", "_")[:31]
 IMAGE_DIR = f"charts_{user_email}"
 
@@ -39,7 +40,7 @@ try:
         df["Return_Pct"] = pd.to_numeric(df["Return_Pct"], errors='coerce').fillna(0)
         df["Qty"] = pd.to_numeric(df["Qty"], errors='coerce').fillna(0)
 except Exception:
-    # If tab doesn't exist, start with empty DF
+    # Initialize empty DF with explicit column names
     df = pd.DataFrame(columns=[
         "Date", "Symbol", "Type", "Confidence", "Entry", "Exit", "Qty", 
         "StopLoss", "Target", "Net_PnL", "Return_Pct", "Status", "Notes", "Chart_Path"
@@ -84,37 +85,31 @@ with st.sidebar:
             
             ret_pct = (net_pnl / (entry_p * qty)) * 100 if exit_p > 0 else 0
             
-            new_row = {
+            new_row = pd.DataFrame([{
                 "Date": date, "Symbol": symbol, "Type": trade_type, "Confidence": conf, 
                 "Entry": entry_p, "Exit": exit_p, "Qty": qty, "StopLoss": sl_p, 
                 "Target": target_p, "Net_PnL": round(net_pnl, 2), 
                 "Return_Pct": round(ret_pct, 2), "Status": status, 
                 "Notes": notes, "Chart_Path": chart_path
-            }
+            }])
             
-            updated_df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            # Using the safer concat method for 2026 standards
+            updated_df = pd.concat([df, new_row], ignore_index=True)
             
             try:
-                # Try updating the sheet normally
                 conn.update(worksheet=user_email, data=updated_df)
             except Exception:
-                st.info(f"Creating a new worksheet for {user_email}...")
-                
-                # Access the client directly to create the sheet
-                # This uses the underlying gspread library properly
+                st.info(f"Creating new tab for {user_email}...")
+                # Robust multi-version check for the internal gspread client
                 try:
-                    # For newer versions of the connector, use the session's client
-                    client = conn._instance
-                    spreadsheet = client.open_by_key(conn._spreadsheet_id)
+                    spreadsheet = conn._instance.client.open_by_key(conn._spreadsheet_id)
                 except AttributeError:
-                    # Fallback for older/alternate versions
-                    spreadsheet = conn.client.open_by_key(conn._spreadsheet_id)
+                    spreadsheet = conn._instance.open_by_key(conn._spreadsheet_id)
                 
-                # Create the worksheet and re-try the update
                 spreadsheet.add_worksheet(title=user_email, rows="100", cols="20")
                 conn.update(worksheet=user_email, data=updated_df)
             
-            st.success(f"Trade for {symbol} saved to Cloud!")
+            st.success(f"Trade for {symbol} saved!")
             st.rerun()
 
 # --- MAIN DASHBOARD ---
@@ -138,6 +133,7 @@ if not df.empty:
 
     with tab2:
         st.subheader("Visual Playbook")
+        # Ensure path is a string for os.path.exists
         image_trades = df[df['Chart_Path'].notna() & (df['Chart_Path'] != "")]
         if not image_trades.empty:
             for i in range(0, len(image_trades), 3):
@@ -164,4 +160,3 @@ if not df.empty:
             st.info("Close some trades to generate performance charts.")
 else:
     st.info("Log your first trade to see the analytics.")
-
