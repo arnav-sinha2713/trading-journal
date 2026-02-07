@@ -9,7 +9,6 @@ from streamlit_gsheets import GSheetsConnection
 st.set_page_config(page_title="Stonk Logger Pro", layout="wide")
 
 # --- AUTHENTICATION CHECK ---
-# Uses st.user.get to safely check login status
 if not st.user.get("is_logged_in", False):
     st.title("🔒 Stonk Journal Pro")
     st.info("Welcome! Please log in with your Google account to access your private trading journal.")
@@ -20,7 +19,7 @@ if not st.user.get("is_logged_in", False):
 # --- GOOGLE SHEETS CONNECTION ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# Sanitize email for worksheet (Tab) name compatibility (Max 31 chars)
+# Sanitize email for worksheet (Tab) name compatibility
 user_email = st.user.email.replace("@", "_").replace(".", "_")[:31]
 IMAGE_DIR = f"charts_{user_email}"
 
@@ -34,14 +33,13 @@ if st.sidebar.button("Logout"):
 
 # --- LOAD DATA FROM GOOGLE SHEETS ---
 try:
-    # ttl=0 ensures the app fetches fresh data from the cloud
     df = conn.read(worksheet=user_email, ttl=0)
     if not df.empty:
         df["Net_PnL"] = pd.to_numeric(df["Net_PnL"], errors='coerce').fillna(0)
         df["Return_Pct"] = pd.to_numeric(df["Return_Pct"], errors='coerce').fillna(0)
         df["Qty"] = pd.to_numeric(df["Qty"], errors='coerce').fillna(0)
 except Exception:
-    # Fallback to empty DataFrame if the worksheet doesn't exist yet
+    st.sidebar.warning(f"⚠️ Tab '{user_email}' not found in Google Sheets.")
     df = pd.DataFrame(columns=[
         "Date", "Symbol", "Type", "Confidence", "Entry", "Exit", "Qty", 
         "StopLoss", "Target", "Net_PnL", "Return_Pct", "Status", "Notes", "Chart_Path"
@@ -78,13 +76,8 @@ with st.sidebar:
                 img.save(chart_path)
 
             status = "Closed" if exit_p > 0 else "Open"
-            
-            # Trade Calculation Logic
-            if trade_type == "LONG":
-                net_pnl = (exit_p - entry_p) * qty if exit_p > 0 else 0
-            else: # SHORT
-                net_pnl = (entry_p - exit_p) * qty if exit_p > 0 else 0
-            
+            net_pnl = (exit_p - entry_p) * qty if trade_type == "LONG" else (entry_p - exit_p) * qty
+            if exit_p == 0: net_pnl = 0
             ret_pct = (net_pnl / (entry_p * qty)) * 100 if exit_p > 0 else 0
             
             new_row = pd.DataFrame([{
@@ -97,26 +90,12 @@ with st.sidebar:
             
             updated_df = pd.concat([df, new_row], ignore_index=True)
             
-            # --- ROBUST AUTO-TAB CREATION & UPDATE ---
             try:
-                # Attempt standard update
                 conn.update(worksheet=user_email, data=updated_df)
-            except Exception:
-                st.info(f"Creating new tab for {user_email}...")
-                
-                # Retrieve internal gspread client to create worksheet
-                try:
-                    gc = conn._instance._client 
-                    spreadsheet = gc.open_by_key(conn._spreadsheet_id)
-                except Exception:
-                    gc = conn._instance 
-                    spreadsheet = gc.open_by_key(conn._spreadsheet_id)
-                
-                spreadsheet.add_worksheet(title=user_email, rows="100", cols="20")
-                conn.update(worksheet=user_email, data=updated_df)
-            
-            st.success(f"Trade for {symbol} saved!")
-            st.rerun()
+                st.success(f"Trade for {symbol} saved!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: Could not save to tab '{user_email}'. Please ensure the tab exists in your Google Sheet with the correct headers.")
 
 # --- MAIN DASHBOARD ---
 st.title("📊 Portfolio Overview")
@@ -158,9 +137,6 @@ if not df.empty:
             plot_df = closed_trades.sort_values("Date")
             plot_df['Cumulative_PnL'] = plot_df['Net_PnL'].cumsum()
             st.line_chart(plot_df.set_index("Date")['Cumulative_PnL'])
-            
-            st.subheader("Return % by Confidence Level")
-            st.bar_chart(data=df, x='Confidence', y='Return_Pct')
         else:
             st.info("Close some trades to generate performance charts.")
 else:
