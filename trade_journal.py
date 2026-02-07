@@ -9,6 +9,7 @@ from streamlit_gsheets import GSheetsConnection
 st.set_page_config(page_title="Stonk Logger Pro", layout="wide")
 
 # --- AUTHENTICATION CHECK ---
+# Uses st.user.get to safely check login status
 if not st.user.get("is_logged_in", False):
     st.title("🔒 Stonk Journal Pro")
     st.info("Welcome! Please log in with your Google account to access your private trading journal.")
@@ -33,14 +34,14 @@ if st.sidebar.button("Logout"):
 
 # --- LOAD DATA FROM GOOGLE SHEETS ---
 try:
-    # ttl=0 ensures we don't use cached data when the sheet updates
+    # ttl=0 ensures the app fetches fresh data from the cloud
     df = conn.read(worksheet=user_email, ttl=0)
     if not df.empty:
         df["Net_PnL"] = pd.to_numeric(df["Net_PnL"], errors='coerce').fillna(0)
         df["Return_Pct"] = pd.to_numeric(df["Return_Pct"], errors='coerce').fillna(0)
         df["Qty"] = pd.to_numeric(df["Qty"], errors='coerce').fillna(0)
 except Exception:
-    # Initialize empty DF if user tab doesn't exist yet
+    # Fallback to empty DataFrame if the worksheet doesn't exist yet
     df = pd.DataFrame(columns=[
         "Date", "Symbol", "Type", "Confidence", "Entry", "Exit", "Qty", 
         "StopLoss", "Target", "Net_PnL", "Return_Pct", "Status", "Notes", "Chart_Path"
@@ -78,7 +79,7 @@ with st.sidebar:
 
             status = "Closed" if exit_p > 0 else "Open"
             
-            # Profit/Loss Logic
+            # Trade Calculation Logic
             if trade_type == "LONG":
                 net_pnl = (exit_p - entry_p) * qty if exit_p > 0 else 0
             else: # SHORT
@@ -96,15 +97,20 @@ with st.sidebar:
             
             updated_df = pd.concat([df, new_row], ignore_index=True)
             
-            # --- AUTO-TAB CREATION & UPDATE ---
+            # --- ROBUST AUTO-TAB CREATION & UPDATE ---
             try:
+                # Attempt standard update
                 conn.update(worksheet=user_email, data=updated_df)
             except Exception:
                 st.info(f"Creating new tab for {user_email}...")
+                
+                # Retrieve internal gspread client to create worksheet
                 try:
-                    spreadsheet = conn._instance.client.open_by_key(conn._spreadsheet_id)
-                except AttributeError:
-                    spreadsheet = conn._instance.open_by_key(conn._spreadsheet_id)
+                    gc = conn._instance._client 
+                    spreadsheet = gc.open_by_key(conn._spreadsheet_id)
+                except Exception:
+                    gc = conn._instance 
+                    spreadsheet = gc.open_by_key(conn._spreadsheet_id)
                 
                 spreadsheet.add_worksheet(title=user_email, rows="100", cols="20")
                 conn.update(worksheet=user_email, data=updated_df)
